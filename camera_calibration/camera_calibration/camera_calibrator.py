@@ -36,7 +36,8 @@ import cv2
 import message_filters
 import numpy
 import os
-import rospy
+import rclpy
+from rclpy.node import Node
 import sensor_msgs.msg
 import sensor_msgs.srv
 import threading
@@ -72,7 +73,7 @@ class DisplayThread(threading.Thread):
             cv2.imshow("display", im)
             k = cv2.waitKey(6) & 0xFF
             if k in [27, ord('q')]:
-                rospy.signal_shutdown('Quit')
+                rclpy.shutdown()
             elif k == ord('s'):
                 self.opencv_calibration_node.screendump(im)
 
@@ -90,42 +91,40 @@ class ConsumerThread(threading.Thread):
             self.function(self.queue[0])
 
 
-class CalibrationNode:
-    def __init__(self, boards, service_check = True, synchronizer = message_filters.TimeSynchronizer, flags = 0,
-                 pattern=Patterns.Chessboard, camera_name='', checkerboard_flags = 0):
-        if service_check:
+class CalibrationNode(Node):
+    def __init__(self, boards, service_check = False, synchronizer = message_filters.TimeSynchronizer, flags = 0,
+                 pattern=Patterns.Chessboard, camera_name='camera',camera='camera',left_camera='left_camera',right_camera='right_camera', image='image', checkerboard_flags=0):
+        # TODO will enable this function as soon as set_camera_info enabled
+        # if service_check:
             # assume any non-default service names have been set.  Wait for the service to become ready
-            for svcname in ["camera", "left_camera", "right_camera"]:
-                remapped = rospy.remap_name(svcname)
-                if remapped != svcname:
-                    fullservicename = "%s/set_camera_info" % remapped
-                    print("Waiting for service", fullservicename, "...")
-                    try:
-                        rospy.wait_for_service(fullservicename, 5)
-                        print("OK")
-                    except rospy.ROSException:
-                        print("Service not found")
-                        rospy.signal_shutdown('Quit')
-
+            # for svcname in ["camera", "left_camera", "right_camera"]:
+            #     remapped = svcname
+            #     if remapped != svcname:
+            #         fullservicename = "%s/set_camera_info" % remapped
+            #         print("Waiting for service", fullservicename, "...")
+            #         try:
+            #             rclpy.wait_for_service(fullservicename, 5)
+            #             print("OK")
+            #         except:
+            #             print("Service not found")
+            #             rclpy.shutdown()
+        super().__init__(self._node_name)
         self._boards = boards
         self._calib_flags = flags
         self._checkerboard_flags = checkerboard_flags
         self._pattern = pattern
         self._camera_name = camera_name
-        lsub = message_filters.Subscriber('left', sensor_msgs.msg.Image)
-        rsub = message_filters.Subscriber('right', sensor_msgs.msg.Image)
+        lsub = message_filters.Subscriber(self, sensor_msgs.msg.Image, left_camera)
+        rsub = message_filters.Subscriber(self, sensor_msgs.msg.Image, right_camera)
         ts = synchronizer([lsub, rsub], 4)
         ts.registerCallback(self.queue_stereo)
 
-        msub = message_filters.Subscriber('image', sensor_msgs.msg.Image)
+        msub = message_filters.Subscriber(self,  sensor_msgs.msg.Image, image)
         msub.registerCallback(self.queue_monocular)
 
-        self.set_camera_info_service = rospy.ServiceProxy("%s/set_camera_info" % rospy.remap_name("camera"),
-                                                          sensor_msgs.srv.SetCameraInfo)
-        self.set_left_camera_info_service = rospy.ServiceProxy("%s/set_camera_info" % rospy.remap_name("left_camera"),
-                                                               sensor_msgs.srv.SetCameraInfo)
-        self.set_right_camera_info_service = rospy.ServiceProxy("%s/set_camera_info" % rospy.remap_name("right_camera"),
-                                                                sensor_msgs.srv.SetCameraInfo)
+        self.set_camera_info_cli = self.create_client(sensor_msgs.srv.SetCameraInfo, "%s/set_camera_info" % camera)
+        self.set_left_camera_cli = self.create_client(sensor_msgs.srv.SetCameraInfo, "%s/set_camera_info" % left_camera)
+        self.set_right_camera_cli = self.create_client(sensor_msgs.srv.SetCameraInfo, "%s/set_camera_info" % right_camera)
 
         self.q_mono = deque([], 1)
         self.q_stereo = deque([], 1)
@@ -180,33 +179,36 @@ class CalibrationNode:
 
 
     def check_set_camera_info(self, response):
-        if response.success:
+        if response.result().success:
             return True
 
         for i in range(10):
             print("!" * 80)
         print()
-        print("Attempt to set camera info failed: " + response.status_message)
+        print("Attempt to set camera info failed: " + response.result().status_message)
         print()
         for i in range(10):
             print("!" * 80)
         print()
-        rospy.logerr('Unable to set camera info for calibration. Failure message: %s' % response.status_message)
+        self.get_logger().error('Unable to set camera info for calibration. Failure message: %s' % response.result().status_message)
         return False
 
     def do_upload(self):
         self.c.report()
         print(self.c.ost())
         info = self.c.as_message()
-
+        req = sensor_msgs.srv.SetCameraInfo.Request()
         rv = True
         if self.c.is_mono:
-            response = self.set_camera_info_service(info)
+            req.camera_info = info
+            response = self.set_camera_info_cli.call_async(req)
             rv = self.check_set_camera_info(response)
         else:
-            response = self.set_left_camera_info_service(info[0])
+            req.camera_info = info[0]
+            response = self.set_left_camera_info_service(req)
             rv = rv and self.check_set_camera_info(response)
-            response = self.set_right_camera_info_service(info[1])
+            req.camera_info = info[1]
+            response = self.set_right_camera_info_service(req)
             rv = rv and self.check_set_camera_info(response)
         return rv
 
@@ -218,14 +220,12 @@ class OpenCVCalibrationNode(CalibrationNode):
     FONT_THICKNESS = 2
 
     def __init__(self, *args, **kwargs):
-
-        CalibrationNode.__init__(self, *args, **kwargs)
-
+        self._node_name = 'camera_calibration'
         self.queue_display = deque([], 1)
         self.display_thread = DisplayThread(self.queue_display, self)
         self.display_thread.setDaemon(True)
         self.display_thread.start()
-
+        CalibrationNode.__init__(self, *args, **kwargs)
     @classmethod
     def putText(cls, img, text, org, color = (0,0,0)):
         cv2.putText(img, text, org, cls.FONT_FACE, cls.FONT_SCALE, color, thickness = cls.FONT_THICKNESS)
@@ -243,9 +243,11 @@ class OpenCVCalibrationNode(CalibrationNode):
                 if 280 <= y < 380:
                     self.c.do_save()
                 elif 380 <= y < 480:
-                    # Only shut down if we set camera info correctly, #3993
-                    if self.do_upload():
-                        rospy.signal_shutdown('Quit')
+                    # TODO will enabel do_upload function as soon as set_camera_info service is ready for ros2
+                    print("set_camera_info isn't ready for ros2, do nothing!")
+                    # Only shut down if we set camera info correctly, #399f we set camera info correctly, #3993
+                    # if self.do_upload():
+                    #     rclpy.shutdown()
 
     def on_scale(self, scalevalue):
         if self.c.calibrated:

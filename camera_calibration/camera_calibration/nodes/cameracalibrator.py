@@ -36,19 +36,31 @@ import cv2
 import functools
 import message_filters
 import os
-import rospy
+import rclpy
 from camera_calibration.camera_calibrator import OpenCVCalibrationNode
 from camera_calibration.calibrator import ChessboardInfo, Patterns
 from message_filters import ApproximateTimeSynchronizer
 
 
-def main():
+def main(args=None):
     from optparse import OptionParser, OptionGroup
     parser = OptionParser("%prog --size SIZE1 --square SQUARE1 [ --size SIZE2 --square SQUARE2 ]",
                           description=None)
     parser.add_option("-c", "--camera_name",
                      type="string", default='narrow_stereo',
                      help="name of the camera to appear in the calibration file")
+    parser.add_option("--image",
+                     type="string", default='image',
+                     help="name of the image topic to appear in the calibration file")
+    parser.add_option("--camera",
+                     type="string", default='camera',
+                     help="name of the camera topic to appear in the calibration file")
+    parser.add_option("--left_camera",
+                     type="string", default='left_camera',
+                     help="name of the left camera to appear in the calibration file")
+    parser.add_option("--right_camera",
+                     type="string", default='right_camera',
+                     help="name of the right camera to appear in the calibration file")
     group = OptionGroup(parser, "Chessboard Options",
                         "You must specify one or more chessboards as pairs of --size and --square options.")
     group.add_option("-p", "--pattern",
@@ -66,7 +78,7 @@ def main():
                      type="float", default=0.0,
                      help="allow specified slop (in seconds) when pairing images from unsynchronized stereo cameras")
     group.add_option("--no-service-check",
-                     action="store_false", dest="service_check", default=True,
+                     action="store_false", dest="service_check", default=False,
                      help="disable check for set_camera_info services at startup")
     parser.add_option_group(group)
     group = OptionGroup(parser, "Calibration Optimizer Options")
@@ -141,14 +153,12 @@ def main():
     else:
         checkerboard_flags = cv2.CALIB_CB_FAST_CHECK
 
-    rospy.init_node('cameracalibrator')
-    node = OpenCVCalibrationNode(boards, options.service_check, sync, calib_flags, pattern, options.camera_name,
-                                 checkerboard_flags=checkerboard_flags)
-    rospy.spin()
-
+    rclpy.init(args=args)
+    node = OpenCVCalibrationNode(boards, options.service_check, sync, calib_flags, pattern, camera_name=options.camera_name, camera=options.camera,
+                                 left_camera=options.left_camera, right_camera=options.right_camera,image=options.image, checkerboard_flags=checkerboard_flags)
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
+    main()
+
